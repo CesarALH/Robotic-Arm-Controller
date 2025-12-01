@@ -1,0 +1,287 @@
+#include <msp430.h> 
+
+void servo_move(unsigned int pulso);
+void servo_move2(unsigned int pulso2);
+void servo_move3(unsigned int pulso3);
+void servo_move4(unsigned int pulso4);
+void grabar_movimientos();
+void reproducir_movimientos();
+
+#define ADC_CHANNEL_0 ADC12INCH_0
+#define ADC_CHANNEL_1 ADC12INCH_1
+#define ADC_CHANNEL_2 ADC12INCH_2
+#define ADC_CHANNEL_3 ADC12INCH_3
+
+unsigned int conversion1;
+unsigned int conversion2;
+unsigned int conversion3;
+unsigned int conversion4;
+
+unsigned int grabando = 0;
+unsigned int reproduciendo = 0;
+unsigned int manual = 1;
+
+unsigned int movimiento_inseguro = 0;
+#define LIMITE_VEL 120.0f   // grados/seg
+unsigned long micros();
+float pulso_to_angle(unsigned int pulso) {
+    return (pulso - 1500) * 0.18f;
+}
+
+
+//ESTRUCTURA DE MOVIMIENTOS
+typedef struct {
+    unsigned char servo;
+    unsigned int pulso;
+    unsigned long tiempo;
+} Movimiento;
+
+Movimiento secuencia[1000];
+unsigned int indice = 0;
+
+
+// SERVOS
+unsigned int ultimo_pulso = 1500;
+unsigned int ultimo_pulso2 = 1500;
+unsigned int ultimo_pulso3 = 1500;
+unsigned int ultimo_pulso4 = 1500;
+unsigned long ultimo_tiempo = 0;
+
+
+void main(void) {
+    WDTCTL = WDTPW | WDTHOLD;
+
+    // Pines de salida
+    P1DIR |= BIT2 | BIT3 | BIT4 | BIT5 | BIT6;
+    P2DIR |= BIT0 | BIT2;
+    P3DIR |= BIT2;
+
+    ADC12CTL0 &= ~ADC12ENC;
+
+    ADC12CTL0 = ADC12SHT0_8 | ADC12ON | ADC12MSC;
+    ADC12CTL1 = ADC12SHP | ADC12CONSEQ_1;
+    ADC12CTL2 = ADC12RES_2;
+
+    ADC12MCTL0 = ADC_CHANNEL_0;
+    ADC12MCTL1 = ADC_CHANNEL_1;
+    ADC12MCTL2 = ADC_CHANNEL_2;
+    ADC12MCTL3 = ADC_CHANNEL_3 | ADC12EOS;
+
+    P6SEL |= BIT0 | BIT1 | BIT2;
+
+    ADC12IE = ADC12IE2;
+    ADC12CTL0 |= ADC12ENC;
+
+
+    P1SEL |= BIT2 | BIT3 | BIT4 | BIT5;
+    TA0CCR0 = 20000 - 1;
+
+    TA0CCTL1 = OUTMOD_7; TA0CCR1 = 1500;
+    TA0CCTL2 = OUTMOD_7; TA0CCR2 = 1500;
+    TA0CCTL3 = OUTMOD_7; TA0CCR3 = 1500;
+    TA0CCTL4 = OUTMOD_7; TA0CCR4 = 1500;
+
+    TA0CTL = TASSEL_2 + MC_1;
+
+
+    TA2CTL = TASSEL_2 | MC_2 | TACLR;
+
+
+    // Botones
+    P3DIR &= ~BIT4; P3REN |= BIT4; P3OUT |= BIT4;
+    P3DIR &= ~BIT3; P3REN |= BIT3; P3OUT |= BIT3;
+    P6DIR &= ~BIT6; P6REN |= BIT6; P6OUT |= BIT6;
+
+
+    while (1) {
+
+        if (manual == 1) {
+
+            ADC12CTL0 |= ADC12SC;
+            while (ADC12CTL1 & ADC12BUSY);
+
+            unsigned int potenciometro1 = ADC12MEM0;
+            unsigned int potenciometro2 = ADC12MEM1;
+            unsigned int potenciometro3 = ADC12MEM2;
+            unsigned int potenciometro4 = ADC12MEM3;
+
+            conversion1 = (potenciometro1 * 0.5) + 500;
+            conversion2 = (potenciometro2 * 0.5) + 500;
+            conversion3 = (potenciometro3 * 0.5) + 500;
+            conversion4 = (potenciometro4 * 0.5) + 500;
+
+            servo_move(conversion1);
+            servo_move2(conversion2);
+            servo_move3(conversion3);
+            servo_move4(conversion4);
+        }
+
+        if (!(P3IN & BIT4)) {
+            manual = 1;
+            grabando = 0;
+            reproduciendo = 0;
+            movimiento_inseguro = 0;
+
+            for (unsigned int i=0; i<500; i++) {
+                secuencia[i].servo = 0;
+                secuencia[i].pulso = 0;
+                secuencia[i].tiempo = 0;
+            }
+            indice = 0;
+        }
+
+        if (!(P3IN & BIT3)) { grabando = 1; }
+
+        if (grabando == 1 && manual == 1) {
+            grabar_movimientos();
+        }
+
+        if (!(P6IN & BIT6)) {
+            reproduciendo = 1;
+            grabando = 0;
+            manual = 0;
+        }
+
+        if (reproduciendo == 1) {
+            reproducir_movimientos();
+        }
+
+        __delay_cycles(4000);
+    }
+}
+
+
+
+
+// CONTROL DE SERVOS
+void servo_move(unsigned int pulso) { TA0CCR1 = pulso; }
+void servo_move2(unsigned int pulso2) { TA0CCR2 = pulso2; }
+void servo_move3(unsigned int pulso3) { TA0CCR3 = pulso3; }
+void servo_move4(unsigned int pulso4) { TA0CCR4 = pulso4; }
+
+
+//OBTENER TIEMPO
+unsigned long micros() {
+    return TA2R; // corre a 1 MHz (si SMCLK = 1 MHz)
+}
+
+
+
+// CALCULO DE VELOCIDADES
+int velocidad_segura(unsigned int pulso_anterior, unsigned int pulso_actual, unsigned long dt_us) {
+
+    if (dt_us == 0) return 1; // evitar división entre cero
+
+    float ang1 = pulso_to_angle(pulso_anterior);
+    float ang2 = pulso_to_angle(pulso_actual);
+
+    float dt = dt_us / 1000000.0f;
+
+    float vel = (ang2 - ang1) / dt;
+    if (vel < 0) vel = -vel;
+
+    return (vel <= LIMITE_VEL);
+}
+
+
+
+//GRABAR MOVIMIENTOS
+void grabar_movimientos() {
+
+    unsigned int umbral = 10;
+    unsigned long t = micros();
+
+    // SERVO 1
+    if ((conversion1 > ultimo_pulso + umbral) || (conversion1 < ultimo_pulso - umbral)) {
+
+        unsigned long dt = t - ultimo_tiempo;
+
+        if (velocidad_segura(ultimo_pulso, conversion1, dt)) {
+
+            secuencia[indice].servo = 1;
+            secuencia[indice].pulso = conversion1;
+            secuencia[indice].tiempo = t;
+            indice++;
+
+            ultimo_pulso = conversion1;
+            ultimo_tiempo = t;
+
+        } else {
+            movimiento_inseguro = 1;
+        }
+    }
+
+
+    // SERVO 2
+    if ((conversion2 > ultimo_pulso2 + umbral) || (conversion2 < ultimo_pulso2 - umbral)) {
+
+        unsigned long dt = t - ultimo_tiempo;
+
+        if (velocidad_segura(ultimo_pulso2, conversion2, dt)) {
+
+            secuencia[indice].servo = 2;
+            secuencia[indice].pulso = conversion2;
+            secuencia[indice].tiempo = t;
+            indice++;
+
+            ultimo_pulso2 = conversion2;
+            ultimo_tiempo = t;
+
+        } else {
+            movimiento_inseguro = 1;
+        }
+    }
+
+    // SERVO 3 (únicos 3 DOF reales)
+    if ((conversion3 > ultimo_pulso3 + umbral) || (conversion3 < ultimo_pulso3 - umbral)) {
+
+        unsigned long dt = t - ultimo_tiempo;
+
+        if (velocidad_segura(ultimo_pulso3, conversion3, dt)) {
+
+            secuencia[indice].servo = 3;
+            secuencia[indice].pulso = conversion3;
+            secuencia[indice].tiempo = t;
+            indice++;
+
+            ultimo_pulso3 = conversion3;
+            ultimo_tiempo = t;
+
+        } else {
+            movimiento_inseguro = 1;
+        }
+    }
+
+    // SERVO 4 sin análisis cinemático
+}
+
+
+
+//REPRODUCIR MOVIMIENTOS
+void reproducir_movimientos() {
+
+    if (movimiento_inseguro) {
+        // seguridad: reproducir más lento
+        for (int i = 0; i < indice; i++) {
+            switch (secuencia[i].servo) {
+                case 1: servo_move(secuencia[i].pulso); break;
+                case 2: servo_move2(secuencia[i].pulso); break;
+                case 3: servo_move3(secuencia[i].pulso); break;
+            }
+            __delay_cycles(50000); // más lento por seguridad
+        }
+    }
+
+    else {
+        // reproducción normal
+        for (int i = 0; i < indice; i++) {
+            switch (secuencia[i].servo) {
+                case 1: servo_move(secuencia[i].pulso); break;
+                case 2: servo_move2(secuencia[i].pulso); break;
+                case 3: servo_move3(secuencia[i].pulso); break;
+                case 4: servo_move4(secuencia[i].pulso); break;
+            }
+            __delay_cycles(20000);
+        }
+    }
+}
